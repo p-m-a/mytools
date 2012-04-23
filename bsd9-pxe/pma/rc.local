@@ -1,0 +1,145 @@
+#!/bin/sh
+# $FreeBSD: release/9.0.0/release/rc.local 225637 2011-09-17 09:25:45Z nwhitehorn $
+
+: ${DIALOG_OK=0}
+: ${DIALOG_CANCEL=1}
+: ${DIALOG_HELP=2}
+: ${DIALOG_EXTRA=3}
+: ${DIALOG_ITEM_HELP=4}
+: ${DIALOG_ESC=255}
+
+kbdcontrol -d >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+	# Syscons: use xterm
+	TERM=xterm
+else
+	# Serial or other console
+	echo
+	echo "Welcome to FreeBSD!"
+	echo
+	echo "Please choose the appropriate terminal type for your system."
+	echo "Common console types are:"
+	echo "   ansi     Standard ANSI terminal"
+	echo "   vt100    VT100 or compatible terminal"
+	echo "   xterm    xterm terminal emulator (or compatible)"
+	echo
+	echo -n "Console type [vt100]: "
+	read TERM
+	TERM=${TERM:-vt100}
+fi
+export TERM
+
+	# If not netbooting, have the installer configure the network
+	dlv=`/sbin/sysctl -n vfs.nfs.diskless_valid 2> /dev/null`
+	if [ ${dlv:=0} -eq 0 -a ! -f /etc/diskless ]; then
+		BSDINSTALL_CONFIGCURRENT=yes; export BSDINSTALL_CONFIGCURRENT
+	fi
+
+	trap true SIGINT	# Ignore cntrl-C here
+	#bsdinstall
+clear
+echo "Preparing Hard Drive"
+if [ `camcontrol  devlist   | awk -F\( '{ print $2}' | awk -F\, '{print $1}' | grep da` = 'da0' ] ; then 
+	echo "- Controleur Disque da0"
+	DISK=da0
+fi
+if [ `camcontrol  devlist   | awk -F\( '{ print $2}' | awk -F\, '{print $1}' | grep da` = 'ad0' ] ; then 
+	echo "- Controleur Disque ad0"
+	DISK=ad0
+fi
+sleep 3
+echo "- Reset Partitions"
+gpart delete -i 1 ${DISK}
+gpart delete -i 2 ${DISK}
+gpart delete -i 3 ${DISK}
+gpart destroy -F ${DISK}
+echo "- Partition Auto GPT Format"
+gpart create -s gpt da0
+gpart add -b 34 -s 64k -t freebsd-boot ${DISK}
+gpart add -s 2G -t freebsd-swap -l swap0 ${DISK}
+gpart add -t freebsd-zfs -l syspool ${DISK}
+gpart bootcode -b /boot/pmbr -p /boot/gptzfsboot -i 1 ${DISK}
+
+echo "- Create ZFS"
+zpool create -f -o altroot=/mnt -o cachefile=/var/tmp/zpool.cache syspool /dev/gpt/syspool
+
+zfs create -o compression=on -o setuid=off syspool/tmp
+chmod 1777 /mnt/tmp
+zfs create syspool/usr
+zfs create syspool/usr/home
+cd /mnt
+ln -s usr/home home
+zfs create syspool/usr/local
+zfs create -o compression=on -o setuid=off syspool/usr/ports
+zfs create -o exec=off -o setuid=off syspool/usr/ports/distfiles
+zfs create -o exec=off -o setuid=off syspool/usr/ports/packages
+zfs create syspool/usr/obj
+zfs create -o compression=on -o exec=on -o setuid=off syspool/usr/src
+## passer a off si on ne veut pas compiler ;)
+zfs create syspool/var
+zfs create -o exec=off -o setuid=off syspool/var/backups
+zfs create -o compression=on -o exec=off -o setuid=off syspool/var/crash
+zfs create -o exec=off -o setuid=off syspool/var/db
+zfs create -o compression=on -o setuid=off syspool/var/db/pkg
+zfs create -o exec=off -o setuid=off syspool/var/empty
+zfs create -o compression=on -o exec=off -o setuid=off syspool/var/log
+zfs create -o compression=on -o exec=off -o setuid=off syspool/var/mail
+zfs create -o exec=off -o setuid=off syspool/var/run
+zfs create -o compression=on -o setuid=off syspool/var/tmp
+chmod 1777 /mnt/var/tmp
+zpool set bootfs=syspool syspool
+mkdir -p /mnt/boot/zfs
+cp /var/tmp/zpool.cache /mnt/boot/zfs/zpool.cache
+echo "Setting Dummy Hostname"
+hostname install-tmp
+echo "Extract System"
+cd /mnt
+echo "- Base"
+tar xfzp /usr/freebsd-dist/base.txz 
+echo "- Kernel - GENERIC"
+tar xfzp /usr/freebsd-dist/kernel.txz 
+mv /mnt/boot/kernel /mnt/boot/kernel.GENERIC
+echo "- Kernel - ByTel"
+tar xfzp /pma/bytel.txz
+echo "- Compat32"
+tar xfzp /usr/freebsd-dist/lib32.txz 
+cd /
+echo "Extract Packages"
+cp /pma/pkg/* /mnt/tmp
+echo "- Postfix"
+# patch non interactive
+cp /pma/mailer.conf /mnt/etc/mail/
+pkg_add -C /mnt /tmp/postfix-2.9.1,1.tbz > /dev/null 2>&1
+echo "- Bash Static"
+pkg_add -C /mnt /tmp/bash-static-4.1.11.tbz > /dev/null 2>&1
+echo "- Compat Linux"
+kldload linux
+pkg_add -C /mnt /tmp/linux_base-f10-10_4.tbz > /dev/null 2>&1
+echo "Install default config"
+cp /pma/rc.conf /mnt/etc/rc.conf
+cp /pma/loader.conf /mnt/boot/
+cp /pma/fstab /mnt/etc
+cp /pma/periodic.conf /mnt/etc
+echo "Set default root Password"
+echo '$1$YnsAdCoG$ODSFpst90uyLEqGOaLwOB.' |  pw -V /mnt/etc/ user mod root -H 0
+echo "Set timezone"
+cp /mnt/usr/share/zoneinfo/Europe/Paris /mnt/etc/localtime
+echo "Bash if tty for root"
+echo "tty > /dev/null && exec bash" >> /mnt/root/.cshrc
+echo "Custom MOTD"
+cp /pma/motd /mnt/etc/motd
+echo "Finished !"
+echo "Clavier en francais"
+/usr/sbin/kbdcontrol -l fr.iso.kbd
+echo "Network Config"
+/usr/sbin/bsdinstall hostname
+sleep 1
+/usr/sbin/bsdinstall netconfig
+cat /mnt/etc/rc.conf /tmp/bsdinstall_etc/rc.conf.* > /tmp/rc.conf
+mv /tmp/rc.conf /mnt/etc/rc.conf
+cp /tmp/bsdinstall_etc/resolv.conf /mnt/etc/resolv.conf
+echo "Shell chroot de la derniere chance !"
+chroot /mnt /usr/local/bin/bash
+echo "Rebooting..."
+rm /mnt/tmp/*.tbz
+reboot
